@@ -21,38 +21,35 @@ from matplotlib.animation import FFMpegWriter
 class SimParams:
 	h: float    = 0.005     #Spatial grid spacing
 	dt:float    = 0.005     #Timestep
-	rtol:float  = 0.2       #Tolerance to say an agent has 'reached' a point
+	rtol:float  = 0.1       #Tolerance to say an agent has 'reached' a point
 	R: float    = 1         #Radius of initial semicircle path
 
 	# Field
-	pi0: float = 1.0        #numerator for per-agent kp=kp0/num_steps
-	kp:  float = 3.0        #Generation constant
-	kn: float  = 0.10       #Decay constant
-	D: float   = 0.0005     #Diffusion costant
-	z: float   = 5.0        #Saturation Term
-	sigma:float= 0.02       #Width of laid trail
-	k_for:float= 0.0        #relative strength of forager pheromone laying to a worker
+	kp0: float = 3000.0     #numerator for per-agent kp=kp0/num_steps
+	kpl: float = 5.0       #Generation constant
+	kn: float  = 0.0001       #Decay constant
+	D: float   = 0.0001     #Diffusion costant
+	z: float   = 0.00       #Saturation Term
+	sigma: float = 0.05     #Width of laid trail
 
 	# Agent
 	v_a: float  = 0.50      #Average speed of agents
 	s_mu: float = 0.05      #sigma_mu: Standard deviation of agent speeds
-	l: float    = 0.02      #Length between antennae and pher laying organs
-	rest:int    = 200       #Avg no. of timesteps to rest for
-	s_rest:float= 70        #Variance in no. of rest steps
-	
-	
-	#Collosion Avoidance
-	defl:float  = 0.8*np.pi #Angular velocity of turning to avoid collisions
+	l: float    = 0.01      #Length between antennae and pher laying organs
+	defl:float  = 0.0*np.pi #Angular velocity of turning to avoid collisions
 	rdist:float = 0.07      #Minimum distance at which collision avoidance behaviour begins
-	
-	#Intrinsic Policy
-	G: float    = 0.06      #Directional Gain
-	n: float    = 0.01      #Intrinsic policy noise
 
-	#OU Process
-	alpha: float = 0.1      #Strength of mean reverting behaviour
-	diff: float  = 0.005    #OU diffusion factor
-	p_switch: float = 0.001 #Switching probability (Intrinsic to OU) per step
+	rest:int    = 200       #Avg no. of timesteps to rest for
+	s_rest:float= 50        #Variance in no. of rest steps
+
+	#Intrinsic Policy
+	G: float    = 0.08     #Directional Gain
+	n: float    = 0.00      #Intrinsic policy noise
+
+	#OU Process6
+	alpha: float = 0.3      #Strength of mean reverting behaviour
+	diff: float  = 0.00    #OU diffusion factor
+	p_switch: float = 0.005  #Switching probability (Intrinsic to OU) per step
 
 	def __post_init__(self):
 		self.colony = np.array([self.R, 0.0])   #Colony Location
@@ -66,21 +63,20 @@ class SimParams:
 
 def sample_gradient(field, sensors):
     """
-    Sample discrete gradient of the pheromone field at each sensor's nearest grid point.
+    Sample discrete gradient of the pheromone field at each sensor's nearest grid cell.
     """
-    #Convert world coordinates to nearest grid indices
-    i = np.floor((sensors[:,0] - params.X.min()) / params.h).astype(int)
-    j = np.floor((sensors[:,1] - params.Y.min()) / params.h).astype(int)
+    # Convert world coordinates -> grid indices
+    i = ((agents["pos"][:,0] - params.X.min()) / params.h).astype(int)
+    j = ((agents["pos"][:,1] - params.Y.min()) / params.h).astype(int)
 
-    #Keep only valid indices
+    # Keep only valid indices
     valid = (i > 0) & (i < params.Nx-1) & (j > 0) & (j < params.Ny-1)
-    gx = np.zeros(sensors.shape[0], dtype=float)
-    gy = np.zeros(sensors.shape[0], dtype=float)
-    
-    if np.any(valid):
-        #Compute central differences only for valid ones
-        gx[valid] = (field[i[valid]+1, j[valid]] - field[i[valid]-1, j[valid]]) / (2.0 * params.h)
-        gy[valid] = (field[i[valid], j[valid]+1] - field[i[valid], j[valid]-1]) / (2.0 * params.h)
+    gx = np.zeros_like(i, dtype=float)
+    gy = np.zeros_like(j, dtype=float)
+
+    # Compute central differences only for valid ones
+    gx[valid] = (c[i[valid]+1, j[valid]] - c[i[valid]-1, j[valid]]) / (2 * params.h)
+    gy[valid] = (c[i[valid], j[valid]+1] - c[i[valid], j[valid]-1]) / (2 * params.h)
 
     return np.stack([gx, gy], axis=1)
 
@@ -95,10 +91,10 @@ def matvec(v):
     dt, D, kn, h = params.dt, params.D, params.kn, params.h
 
     V = v.reshape((Nx, Ny))
-    Lv = np.zeros_like(V)
-    #Laplacian of v using central differences
-    Lv[1:-1,1:-1] = (V[2:,1:-1] + V[:-2,1:-1] + V[1:-1,2:] + V[1:-1,:-2] - 4*V[1:-1,1:-1]) / (h**2)
-    return ((1 + kn*dt) * v - (dt * D) * Lv.ravel())
+    L = np.zeros_like(V)
+    #Laplacian using central differences
+    L[1:-1,1:-1] = (V[2:,1:-1] + V[:-2,1:-1] + V[1:-1,2:] + V[1:-1,:-2] - 4*V[1:-1,1:-1]) / (h**2)
+    return ((1 + kn*dt) * v - (dt * D) * L.ravel())
 
 #Initial semicircle path
 def set_initial_semicircle():
@@ -108,10 +104,22 @@ def set_initial_semicircle():
     c = np.zeros((Nx, Ny), dtype=float)
     r = np.sqrt(params.X**2 + params.Y**2)
     mask = (params.Y >= 0) & (np.abs(r - R) <= params.h)
-    c[mask] = 1.0
-    kern = make_gaussian_kernel(sigma=1.0*params.sigma, h=params.h)
+    c[mask] = 3.0
+    kern = make_gaussian_kernel(sigma=2.0*params.sigma, h=params.h)
     c = fftconvolve(c, kern, mode='same')
-    c /= 10*c.max()
+    return c
+
+def set_initial_angle():
+    Nx, Ny = params.Nx, params.Ny
+    R, sigma = params.R, params.sigma
+
+    c = np.zeros((Nx, Ny), dtype=float)
+    mask = (np.abs(2*params.Y + params.X - params.R) <= 2*params.h) & (params.X>0) & (params.Y>0)
+    c[mask] = 4.0
+    mask = (np.abs(2*params.Y - params.X - params.R) <= 2*params.h) & (params.X<0) & (params.Y>0)
+    c[mask] = 4.0
+    kern = make_gaussian_kernel(sigma=2.0*params.sigma, h=params.h)
+    c = fftconvolve(c, kern, mode='same')
     return c
 
 def make_gaussian_kernel(sigma, h):
@@ -121,42 +129,42 @@ def make_gaussian_kernel(sigma, h):
     y = np.linspace(-3*sigma, 3*sigma, size)
     Xg, Yg = np.meshgrid(x, y)
     k = np.exp(-(Xg**2 + Yg**2)/(2*sigma**2))
-    #k /= 10*k.max()
+    k /= k.sum()
     return k
 
 #Agents ------------------------------------------------------------------------
 def initialize_agents(w=12, f=8):
-    total = w + f
+    total = w + 1
 
     #Arrays
-    pos     =   np.zeros((total,2), dtype=float)
-    thet    =   np.zeros(total, dtype=float)
-    mu      =   np.random.normal(scale=params.s_mu, size=total)
-    steps   =   np.zeros(total, dtype=int)
-    pi      =   np.full(total, 0.0, dtype=float)
-    isForager=  np.zeros(total, dtype=bool)
-    tgtphi  =   np.zeros(total, dtype=float)   #stored heading direction in agent memory
-    policy  =   np.zeros(total, dtype=bool) #0=Intrinsic, 1=OU
-    state   =   np.zeros(total, dtype=bool)  #0=resting, 1=moving
-    tot_rest=   (np.random.randn(total)*params.s_rest + params.rest).astype(int)
-    rest_steps= np.zeros(total, dtype=int)
-    gradient=   np.zeros((total,2), dtype=float)
+    pos =   np.zeros((total,2), dtype=float)
+    thet =  np.zeros(total, dtype=float)
+    mu =    np.random.normal(scale=params.s_mu, size=total)
+    laying= np.zeros(total, dtype=bool)
+    isForager = np.zeros(total, dtype=bool)
+    state = np.zeros(total, dtype=bool)  #0=resting, 1=moving
+    steps = np.zeros(total, dtype=int)
+    tot_rest = (np.random.randn(total)*params.s_rest + params.rest).astype(int)
+    rest_steps = np.zeros(total, dtype=int)
+    kp_agent = np.full(total, params.kpl, dtype=float)
+    policy = np.zeros(total, dtype=bool) #0=Intrinsic, 1=OU
+    tgtphi = np.zeros(total, dtype=float)   #stored heading direction in agent memory
+    gradient = np.zeros((total,2), dtype=float)
 
     R = params.R
-    idx = 0
-
-    #workers:
-    for i in range(w//2):   #Workers heading to food
-        pos[idx] = [R*np.cos(2*i*np.pi/w), R*np.sin(2*i*np.pi/w)]
-        thet[idx] = (2*i*np.pi/w + np.pi/2)
+    idx = 0   
+    for i in range((w+1)//2): #workers: 
+        pos[idx] = [R*(4*i/w -1), 0.5*R*min(4*i/w, 2-4*i/w)]
+        thet[idx] = np.pi/4 if pos[idx][0]<0 else -np.pi/4
         state[idx] = 1
+        laying[idx] = True
         idx += 1
-    for j in range(w//2):   #Workers headinf to colony
-        i = j + 0.8
-        pos[idx] = [R*np.cos(2*i*np.pi/w), R*np.sin(2*i*np.pi/w)]
-        thet[idx] = (2*i*np.pi/w - np.pi/2)
+
+    for j in range((w+1)//2):
+        i = j + 0.5
+        pos[idx] = [R*(4*i/w -1), 0.5*R*min(4*i/w, 2-4*i/w)]
+        thet[idx] = np.pi/4 if pos[idx][0]<0 else 3*np.pi/4
         state[idx] = 1
-        pi[idx] = 1
         idx += 1
 
     #foragers:
@@ -174,12 +182,13 @@ def initialize_agents(w=12, f=8):
         "thet": thet,
         #"phat": phat,
         "mu": mu,
-        "pi": pi,
+        "laying": laying,
         "isForager": isForager,
         "state": state,
         "steps": steps,
         "rest_steps": rest_steps,
         "tot_rest": tot_rest,
+        "kp_agent": kp_agent,
         "policy": policy,
         "tgtphi": tgtphi,
         "gradient": gradient
@@ -202,23 +211,26 @@ def sim_step():
 
     #Implicit diffusion+decay step
     rhs = cvec
-    rhs[:] = c.ravel() + params.kp * rho.ravel() * params.dt
-    sol, _ = spla.cg(A, rhs, x0=cvec, maxiter=500, atol=1e-6)
+    rhs[:] = c.ravel() + rho.ravel() * params.dt
+    sol, info = spla.cg(A, rhs, x0=cvec, maxiter=500, atol=1e-6)
+    if info != 0:
+        #fallback: simple explicit update
+        cvec[:] = rhs / (1 + params.kn * params.dt)
     cvec[:] = sol
     c[:] = cvec.reshape((params.Nx, params.Ny))
 
 def deposit_agents():
     mask = np.zeros((params.Nx, params.Ny), dtype=float)
-    laying_idx = np.nonzero(agents["pi"]>0)[0]
+    laying_idx = np.nonzero(agents["laying"])[0]
     if laying_idx.size == 0:
         return np.zeros_like(mask)
     pos = agents["pos"][laying_idx]# - params.l * agents["phat"][laying_idx]
-    pi = agents["pi"][laying_idx]
+    kps = agents["kp_agent"][laying_idx]
     #map to integer grid indices
     ix = np.floor((pos[:,0] - params.X.min()) / params.h).astype(int)
     iy = np.floor((pos[:,1] - params.Y.min()) / params.h).astype(int)
 
-    np.add.at(mask, (ix, iy), pi)
+    np.add.at(mask, (ix, iy), kps)
     deposit = fftconvolve(mask, kernel, mode='same')
     #saturation
     deposit = deposit / (1.0 + params.z * deposit)
@@ -229,13 +241,13 @@ def apply_repulsion(agents):
     pos = agents["pos"]
 
     #consider only agents not at colony (active)
-    active_mask = ~((np.sum((pos - params.colony)**2, axis=1)) < (params.rtol**2)) #1 if outside colony
+    active_mask = ~((np.sum((pos - params.colony)**2, axis=1)) < (params.rtol**2)) #1 if not at colony
     act_idx = np.nonzero(active_mask)[0]
     positions = pos[act_idx]
     tree = cKDTree(positions)
-    pairs = np.array(list(tree.query_pairs(r=params.rdist)))  #array of agents closer than rdist shape, (M,2) or empty
+    pairs = np.array(list(tree.query_pairs(r=params.rdist)))  #array of agents closer than rdist shape (M,2) or empty
     if pairs.size == 0:
-        return #no pairs to repel
+        return
     a = pairs[:,0]; b = pairs[:,1]
     ia = act_idx[a]; ib = act_idx[b]  #indices
 
@@ -263,7 +275,7 @@ def step_agents(agents, field):
     thet = agents["thet"]
     #phat = agents["phat"]
     state = agents["state"]        #0: Resting, 1: Moving
-    pi = agents["pi"]
+    laying = agents["laying"]
     isFor = agents["isForager"]
     policy = agents["policy"]      #0: Intrinsic, 1: OU
 
@@ -274,20 +286,22 @@ def step_agents(agents, field):
         (agents["pos"][:, 1] < params.Y.min() + params.h) |
         (agents["pos"][:, 1] >= params.Y.max() - params.h)
     )
-    agents["pi"][mask_reset] = 0.0
+    agents["laying"][mask_reset] = False
 #    agents["rest_steps"]
     agents["pos"][mask_reset] = params.colony.copy()  #reset to colony
     agents["thet"][mask_reset] = np.pi/2
     agents["state"][mask_reset] = 0 #resting
-    agents["policy"][mask_reset] = 0 #Int Poilicy
 
     #Compute gradients at sensors (antennae)
     sensors = pos + params.l * np.column_stack([np.cos(agents["thet"]), np.sin(agents["thet"])])
     grads = sample_gradient(field, sensors)
     agents["gradient"] = grads
 
+
+    #grads = sample_gradient(field, sensors)
+
     #Mask groups
-    laying = (pi > 0)
+    laying = (laying == True)
     moving = (state == 1)
     resting = (state == 0)
     int_mask = (policy == 0) & moving
@@ -308,44 +322,32 @@ def step_agents(agents, field):
         if np.any(switch):
             idx_switch = idx[switch]
             vec = params.food.reshape(1,2) - agents["pos"][idx_switch] #New heading direction
-#            print(f'tgt drctn:{params.food.reshape(1,2)}, posns:{vec}')
-            agents["thet"][idx_switch] = np.arctan2(vec[:,1], vec[:,0])# % 2*np.pi
-            agents["tgtphi"][idx_switch] = np.arctan2(vec[:,1], vec[:,0])# % 2*np.pi
-#            print(agents["tgtphi"][idx_switch])
+            agents["thet"][idx_switch] = np.arctan2(vec[:,1], vec[:,0]) % 2*np.pi
+            agents["tgtphi"][idx_switch] = np.arctan2(vec[:,1], vec[:,0]) % 2*np.pi
             agents["policy"][idx_switch] = 1     #switch to OU
             agents["steps"][idx_switch] = 0      #reset step count
             #print(np.arctan2(vec[:,1], vec[:,0]))
 
-    #Near food: agent attracted to it
-    mask_nearfood = moving & (5*params.h < np.linalg.norm(pos - params.food, axis=1)) & (np.linalg.norm(pos - params.food, axis=1) < params.rtol) & ~laying
-    if np.any(mask_nearfood):
-        vec_nearfood = params.food.reshape(1,2) - agents["pos"][mask_nearfood]
-        thet[mask_nearfood] = np.arctan2(vec_nearfood[:,1], vec_nearfood[:,0])
-    
-    #At food location
-    mask_food = moving & (np.linalg.norm(pos - params.food, axis=1) < 5*params.h) & ~laying
+    #Reached food
+    mask_food = moving & (np.linalg.norm(pos - params.food, axis=1) < params.rtol) & ~laying  #Agents that have reached food
     if np.any(mask_food):
         pos[mask_food] = params.food
         thet[mask_food] += np.pi
+        #phat[mask_food] = np.column_stack([np.cos(thet[mask_food]), np.sin(thet[mask_food])])
         agents["tgtphi"] += np.pi
-        agents["steps"][mask_food] += np.round( 5*params.h / (params.v_a * params.dt)).astype(int)
-        agents["pi"][mask_food] = 1.0 + params.k_for * agents["isForager"][mask_food]
-
-    #Near colony: agent attracted to it
-    mask_nearcol = moving & (5*params.h < np.linalg.norm(pos - params.colony)) & (np.linalg.norm(pos - params.colony, axis=1) < params.rtol) & laying
-    if np.any(mask_nearcol):
-        vec_nearcol = params.colony.reshape(1,2) - agents["pos"][mask_nearcol]
-        thet[mask_nearcol] = np.arctan2(vec_nearcol[:,1], vec_nearcol[:,0])
+        agents["laying"][mask_food] = True
+        agents["steps"][mask_food] += np.round( params.rtol / (params.v_a * params.dt)).astype(int)
 
     #Reached colony
-    mask_col = moving & (np.linalg.norm(pos - params.colony, axis=1) < 5*params.h) & laying
+    mask_col = moving & (np.linalg.norm(pos - params.colony, axis=1) < params.rtol) & laying
     if np.any(mask_col):
         pos[mask_col] = params.colony
         thet[mask_col] = np.pi / 2.0
+        #phat[mask_col] = np.column_stack([np.cos(thet[mask_col]), np.sin(thet[mask_col])])
         agents["rest_steps"][mask_col] = agents["tot_rest"][mask_col]
         agents["steps"][mask_col] = 0
-        state[mask_col] = 0            #switch to resting
-        agents["pi"][mask_col] = 0.0
+        state[mask_col] = 0            # switch to resting
+        agents["laying"][mask_col] = False
 
     #Resting agents decrement timers
     if np.any(resting):
@@ -423,18 +425,15 @@ def animate_sim(steps=1400, interval=25):
     ax.set_xlim(params.X.min(), params.X.max())
     ax.set_ylim(params.Y.min(), params.Y.max())
 
-    #Pheromone field
-    im = ax.imshow(c.T, origin='lower', cmap='RdPu', vmin=0, vmax=1.0,
-                   extent=[params.X.min(), params.X.max(), params.Y.min(), params.Y.max()], animated=True)
-    
     #colony / food visuals
     for i in range(6):
-        r = params.rtol * (1 + 0.3*i)/(1+0.3*5)
-        a = 0.5 * (1 - i/6)
-        ax.add_patch(plt.Circle((params.colony[0], params.colony[1]), r, color='red', alpha=a, lw=0, zorder=1))
-        ax.add_patch(plt.Circle((params.food[0], params.food[1]), r, color='mediumvioletred', alpha=a, lw=0, zorder=1))
-    
-    #Agents
+        r = params.rtol * 0.4 * (1 + 0.3*i)
+        a = 0.3 * (1 - i/6)
+        ax.add_patch(plt.Circle(params.colony, r, color='red', alpha=a, lw=0, zorder=2))
+        ax.add_patch(plt.Circle(params.food, r, color='mediumvioletred', alpha=a, lw=0, zorder=2))
+
+    im = ax.imshow(c.T, origin='lower', cmap='RdPu', vmin=0, vmax=0.5,
+                   extent=[params.X.min(), params.X.max(), params.Y.min(), params.Y.max()], animated=True)
     quiv = ax.quiver(agents["pos"][:,0], agents["pos"][:,1],
                      np.cos(agents["thet"]), np.sin(agents["thet"]),
                      scale=10, color='black', width=0.003, scale_units='xy')
@@ -459,14 +458,14 @@ def animate_sim(steps=1400, interval=25):
 
         colors = []
         for idx in range(pos.shape[0]):
-            colors.append("limegreen" if agents["pi"][idx] else ("blue" if agents["isForager"][idx] else "orange"))
+            colors.append("limegreen" if agents["laying"][idx] else ("blue" if agents["isForager"][idx] else "orange"))
         scat.set_facecolors(colors)
         time_text.set_text(f"t = {update.t:.2f}")
         update.t += params.dt
         return im, scat, quiv, time_text
     update.t = 0.0
 
-    ani = animation.FuncAnimation(fig, update, frames=steps, interval=interval, blit=False)
+    ani = animation.FuncAnimation(fig, update, frames=steps, interval=interval, blit=True)
     #plt.close()
     return ani
 
@@ -481,15 +480,15 @@ if __name__ == '__main__':
 	
 	#Field  --------------------------------------------------------------------
 	A = LinearOperator((params.Nx*params.Ny, params.Nx*params.Ny), matvec=matvec, dtype=float)  #Matrix Operator to implement Implicit Euler Integration
-	c = set_initial_semicircle()  #Setup Initial Trail
+	c = set_initial_angle()  #Setup Initial Trail
 	cvec = c.ravel()
 	
 	#Setup Agents
-	w = 12
-	f = 8
+	w = 13
+	f = 0
 	agents = initialize_agents(w, f)
 
-	ani = animate_sim(steps=1500, interval=5)
+	ani = animate_sim(steps=1500, interval=25)
 	print('Running...')
 	plt.show(block = True)
 	print('Done')
